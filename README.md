@@ -24,7 +24,7 @@ published detections. Boxes under 0.5 confidence are dropped, or under 0.7 for p
 Most of the errors on the fast road are distant cars the detector missed. A frame takes 3 to
 4 ms at the median and about 7 ms at the 99th percentile, against 100 ms between scans.
 
-## How it works
+## Method
 
 Each track runs an extended Kalman filter over position, heading, speed and turn rate. New
 boxes are matched to predicted tracks with the Hungarian algorithm, and pairs that are too far
