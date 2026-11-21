@@ -32,11 +32,6 @@ using Points = std::vector<fg::Point3>;
 
 namespace {
 
-// How far ahead the scene draws each track's forecast, and the spacing of
-// its points. Chosen.
-constexpr std::int64_t kForecastHorizonMicros = 3'000'000;
-constexpr std::int64_t kForecastStepMicros = 100'000;
-
 // Drawing constants for the point height ramp, the ellipse, and the line,
 // label and ego box sizes. Lengths are in metres. Chosen.
 constexpr float kPointHeightLow = -2.0F;
@@ -328,16 +323,18 @@ void Scene::publish(const Frame& frame, const std::vector<Track>& tracks) {
       trail.push_back(to_point(past - origin_xy, height));
     entity.lines.push_back(line(LineType::LINE_STRIP, color, std::move(trail)));
 
-    TrackState forecast = track.state;
-    const std::int64_t horizon = forecast.time_micros + kForecastHorizonMicros;
+    TrackState path_state = track.state;
+    const std::int64_t horizon =
+        path_state.time_micros + kForecastHorizonMicros;
     Points path;
-    while (forecast.time_micros < horizon) {
-      filter_.advance(forecast, forecast.time_micros + kForecastStepMicros);
-      path.push_back(to_point(forecast.position() - origin_xy, height));
+    while (path_state.time_micros < horizon) {
+      filter_.advance(path_state, path_state.time_micros + kForecastStepMicros);
+      path.push_back(to_point(path_state.position() - origin_xy, height));
     }
     entity.lines.push_back(line(LineType::LINE_STRIP, color, std::move(path)));
+    const TrackState horizon_state = forecast(filter_, track.state);
     entity.lines.push_back(
-        line(LineType::LINE_LOOP, color, ellipse(forecast, origin_)));
+        line(LineType::LINE_LOOP, color, ellipse(horizon_state, origin_)));
 
     fg::TextPrimitive& label = entity.texts.emplace_back();
     const Eigen::Vector3d roof(0.0, 0.0, track.state.height / 2.0);

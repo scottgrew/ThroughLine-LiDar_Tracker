@@ -1,6 +1,7 @@
 // Checks the filter's reported covariance against its real error using
 // NEES, the squared error in units of the filter's own covariance.
 
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <cmath>
@@ -186,4 +187,45 @@ TEST_CASE("filter NEES stays inside the chi-square band") {
 TEST_CASE("motion Jacobian matches finite differences") {
   check_motion_jacobian_matches_covariance(0.3);
   check_motion_jacobian_matches_covariance(0.0);
+}
+
+TEST_CASE("forecast mean is speed times horizon on a straight path") {
+  const MotionFilter filter(kTestNoise);
+  TrackState state;
+  state.mean << 0.0, 0.0, 0.0, 10.0, 0.0;
+  state.covariance = StateMatrix::Identity();
+  state.time_micros = 0;
+  state.acceleration_sigma = kVehiclePrior.acceleration_sigma;
+  const TrackState horizon = forecast(filter, state);
+  constexpr double kHorizonSeconds =
+      static_cast<double>(kForecastHorizonMicros) /
+      static_cast<double>(kMicrosPerSecond);
+  REQUIRE(horizon.mean(kStateX) == Catch::Approx(10.0 * kHorizonSeconds));
+  REQUIRE(horizon.mean(kStateY) == Catch::Approx(0.0));
+}
+
+TEST_CASE("forecast covariance matches stepped advance") {
+  const MotionFilter filter(kTestNoise);
+  TrackState state;
+  state.mean << 0.0, 0.0, 0.0, 10.0, 0.0;
+  state.covariance = StateMatrix::Identity();
+  state.time_micros = 0;
+  state.acceleration_sigma = kVehiclePrior.acceleration_sigma;
+  const TrackState from_forecast = forecast(filter, state);
+  TrackState stepped = state;
+  const std::int64_t horizon = state.time_micros + kForecastHorizonMicros;
+  while (stepped.time_micros < horizon)
+    filter.advance(stepped, stepped.time_micros + kForecastStepMicros);
+  REQUIRE(from_forecast.mean.isApprox(stepped.mean));
+  REQUIRE(from_forecast.covariance.isApprox(stepped.covariance));
+}
+
+TEST_CASE("vehicle prior speed variance comes from FilterNoise::priors") {
+  FilterNoise noise = kTestNoise;
+  noise.priors[class_index(ObjectClass::Vehicle)].speed_sigma = 7.5;
+  const MotionFilter filter(noise);
+  const Detection detection{.object_class = ObjectClass::Vehicle,
+                            .box = {1.0, 2.0, 0.0, 4.0, 2.0, 1.5, 0.1}};
+  const TrackState state = filter.start_state(detection);
+  REQUIRE(state.covariance(kStateSpeed, kStateSpeed) == Catch::Approx(56.25));
 }

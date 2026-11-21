@@ -4,6 +4,8 @@ PYTHON  ?= $(HOME)/venvs/tracker/bin/python
 LOG     ?= $(DATA)/staged/$(SEGMENT).mcap
 DETECTIONS ?= $(DATA)/casa/data/waymo/detections/val/result.pkl
 TRACKS  ?= tracks.csv
+FORECAST ?= forecast.csv
+TRACKER_FLAGS ?=
 MCAP    ?= demo.mcap
 PORT    ?= 8765
 
@@ -22,7 +24,7 @@ TIDY_FLAGS := --quiet -p build \
 RUFF_FLAGS := --line-length 80 --select E,F,W,I,N,UP,B \
   --extend-exclude eval/generated
 
-.PHONY: help build test check stage live run record official clean
+.PHONY: help build test check stage live run record consistency official clean
 
 help:
 	@echo "make build     compile the tracker and the tests"
@@ -43,6 +45,10 @@ build: build/CMakeCache.txt
 
 test: build
 	./build/tracker_tests
+	# The Python tests are plain functions; run each one without pytest.
+	PYTHONPATH=stage:tests $(PYTHON) -c "import inspect, test_consistency as t; \
+	  [f() for n, f in inspect.getmembers(t, inspect.isfunction) \
+	   if n.startswith('test_')]; print('python tests passed')"
 
 check: build
 	clang-format --dry-run --Werror $(CPP_FILES)
@@ -70,6 +76,12 @@ live: build $(LOG)
 
 run: build $(LOG)
 	./build/tracker --segment $(LOG) --export $(TRACKS)
+
+consistency: build $(LOG)
+	./build/tracker --segment $(LOG) --export-forecast $(FORECAST) \
+	  $(TRACKER_FLAGS)
+	$(PYTHON) stage/forecast_consistency.py --segment $(LOG) \
+	  --parquet-root $(DATA)/parquet --forecast $(FORECAST)
 
 record: build $(LOG)
 	./build/tracker --segment $(LOG) --live $(PORT) --record $(MCAP)

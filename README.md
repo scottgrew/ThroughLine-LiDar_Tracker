@@ -17,12 +17,19 @@ published detections. Boxes under 0.5 confidence are dropped, or under 0.7 for p
 
 | scene                       | cars | people |
 |-----------------------------|------|--------|
-| fast road, 63 km/h          | 0.30 | 0.22   |
+| fast road, 63 km/h          | 0.30 | 0.23   |
 | crawling through a junction | 0.54 | 0.57   |
-| slow turn, 21 km/h          | 0.72 | 0.34   |
+| slow turn, 21 km/h          | 0.71 | 0.34   |
 
 Most of the errors on the fast road are distant cars the detector missed. A frame takes 3 to
 4 ms at the median and about 7 ms at the 99th percentile, against 100 ms between scans.
+
+The forecast's uncertainty matches its error. Over 23 validation segments, the 3 s forecast of
+a moving object is compared with where its label is 3 s later, scaled by the forecast's own
+covariance (NEES, which averages 2 when the covariance is right). Vehicles average 1.92 over
+16,632 forecasts, pedestrians 1.91 over 19,100, cyclists 1.71 over 590. The acceleration
+noise per class was fitted to that; with any one segment held out, the fit picks the same
+values in 22 of 23 cases.
 
 ## Method
 
@@ -67,6 +74,7 @@ make stage      # stage one Waymo segment and its CasA boxes
 make live       # track at the scans' own pace on ws://127.0.0.1:8765
 make run        # track as fast as possible and write tracks.csv
 make official   # score tracks.csv with Waymo's evaluator in Docker
+make consistency  # 3 s forecast error against the labels, per class and speed
 ```
 
 Data paths default to `~/waymo-data`: Waymo's v2 Parquet files in `parquet/`, and CasA's
@@ -81,6 +89,7 @@ The Waymo Open Dataset needs a Waymo account. CasA's detection files are linked 
 
 ## Known limitations
 
-- Forecast ellipses on newly confirmed cars are often too wide, and the cause hasn't been
-  found.
+- Forecasts for parked objects are overconfident (NEES 5 to 34 on three segments, at 0.1 to
+  0.6 m median error): the detector's box centre sits a fixed offset from the label's, and
+  the filter averages that offset away as if it were noise.
 - Latency with the viewer connected hasn't been measured.

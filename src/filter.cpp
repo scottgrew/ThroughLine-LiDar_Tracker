@@ -43,8 +43,16 @@ MotionFilter::MotionFilter(FilterNoise noise) : noise_(noise) {
   measurement_noise_ = variances.asDiagonal();
 }
 
+TrackState forecast(const MotionFilter& filter, TrackState state) {
+  const std::int64_t horizon = state.time_micros + kForecastHorizonMicros;
+  while (state.time_micros < horizon)
+    filter.advance(state, state.time_micros + kForecastStepMicros);
+  return state;
+}
+
 TrackState MotionFilter::start_state(const Detection& detection) const {
-  const ClassPrior prior = class_prior(detection.object_class);
+  const ClassPrior& prior =
+      noise_.priors.at(class_index(detection.object_class));
   const Box& box = detection.box;
   StateVector variances;
   variances << measurement_noise_.diagonal(),

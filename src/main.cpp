@@ -17,6 +17,7 @@
 #include <utility>
 #include <vector>
 #include <CLI/CLI.hpp>
+#include <CLI/Validators.hpp>
 #include <Eigen/Dense>
 #include "filter.hpp"
 #include "log.hpp"
@@ -57,6 +58,33 @@ class CsvWriter {
               << yaw << ',' << track.state.mean(kStateSpeed) << ','
               << track.state.mean(kStateYawRate) << '\n';
     }
+  }
+
+ private:
+  std::ofstream stream_;
+};
+
+// Writes one row per confirmed track per frame with the 3 s position forecast
+// and its 2x2 covariance in the world frame.
+class ForecastCsvWriter {
+ public:
+  explicit ForecastCsvWriter(const std::string& path) : stream_(path) {
+    if (!stream_) throw std::runtime_error("cannot open " + path);
+    stream_ << "frame_timestamp_micros,track_id,object_class,x,y,speed,"
+               "forecast_x,forecast_y,cov_xx,cov_xy,cov_yy\n";
+  }
+
+  void write(std::int64_t frame_timestamp_micros, const Track& track,
+             const MotionFilter& filter) {
+    const Eigen::Vector2d position = track.state.position();
+    const TrackState horizon = forecast(filter, track.state);
+    const Eigen::Matrix2d covariance = horizon.covariance.topLeftCorner<2, 2>();
+    stream_ << frame_timestamp_micros << ',' << track.track_id << ','
+            << static_cast<int>(track.object_class) << ',' << position.x()
+            << ',' << position.y() << ',' << track.state.mean(kStateSpeed)
+            << ',' << horizon.mean(kStateX) << ',' << horizon.mean(kStateY)
+            << ',' << covariance(0, 0) << ',' << covariance(0, 1) << ','
+            << covariance(1, 1) << '\n';
   }
 
  private:
@@ -131,6 +159,7 @@ int run(int argument_count, char* const* arguments) {
   CLI::App app{"Live multi-object tracker on a staged Waymo segment"};
   std::string segment_path;
   std::string csv_path;
+  std::string forecast_path;
   SceneOptions scene_options;
   bool paced = false;
   TrackerSettings settings;
@@ -142,12 +171,33 @@ int run(int argument_count, char* const* arguments) {
   app.add_option("--record", scene_options.recording_path,
                  "also write the scene to this .mcap file");
   app.add_option("--export", csv_path, "write confirmed tracks as CSV");
+  app.add_option("--export-forecast", forecast_path,
+                 "write 3 s forecast covariances as CSV");
   app.add_option("--sigma-position", settings.noise.sigma_measurement_position,
                  "measurement position sigma, metres (default: the "
                  "detector's measured error on the segment)");
   app.add_option("--sigma-yaw", settings.noise.sigma_measurement_yaw,
                  "measurement yaw sigma, radians (default: the detector's "
                  "measured error on the segment)");
+  app.add_option("--sigma-yaw-acceleration",
+                 settings.noise.sigma_yaw_acceleration,
+                 "yaw acceleration process noise, rad/s^2")
+      ->check(CLI::PositiveNumber);
+  app.add_option("--acceleration-sigma-vehicle",
+                 settings.noise.priors[class_index(ObjectClass::Vehicle)]
+                     .acceleration_sigma,
+                 "vehicle linear acceleration sigma, m/s^2")
+      ->check(CLI::PositiveNumber);
+  app.add_option("--acceleration-sigma-pedestrian",
+                 settings.noise.priors[class_index(ObjectClass::Pedestrian)]
+                     .acceleration_sigma,
+                 "pedestrian linear acceleration sigma, m/s^2")
+      ->check(CLI::PositiveNumber);
+  app.add_option("--acceleration-sigma-cyclist",
+                 settings.noise.priors[class_index(ObjectClass::Cyclist)]
+                     .acceleration_sigma,
+                 "cyclist linear acceleration sigma, m/s^2")
+      ->check(CLI::PositiveNumber);
   CLI11_PARSE(app, argument_count, arguments);
   paced = scene_options.live_port != 0;
 
@@ -158,11 +208,14 @@ int run(int argument_count, char* const* arguments) {
     settings.noise.sigma_measurement_yaw = reader.info().yaw_sigma;
 
   Tracker tracker(settings);
-  std::optional<CsvWriter> csv;
-  if (!csv_path.empty()) csv.emplace(csv_path);
+  const MotionFilter forecast_filter(settings.noise);
   std::optional<Scene> scene;
   if (paced || !scene_options.recording_path.empty())
     scene.emplace(scene_options, settings.noise);
+  std::optional<CsvWriter> csv;
+  if (!csv_path.empty()) csv.emplace(csv_path);
+  std::optional<ForecastCsvWriter> forecast_csv;
+  if (!forecast_path.empty()) forecast_csv.emplace(forecast_path);
   if (paced)
     std::cout << "serving ws://127.0.0.1:" << scene_options.live_port
               << " for Lichtblick\n";
@@ -185,6 +238,10 @@ int run(int argument_count, char* const* arguments) {
     times.track.record(track_start, track_end);
 
     if (csv) csv->write(*frame, tracks);
+    if (forecast_csv) {
+      for (const Track& track : tracks)
+        forecast_csv->write(frame->capture_time_micros, track, forecast_filter);
+    }
     if (scene) scene->publish(*frame, tracks);
     times.publish.record(track_end, Clock::now());
     times.close_frame();
