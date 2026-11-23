@@ -16,11 +16,23 @@ MOTA from Waymo's evaluator (LEVEL_2) on CasA's published detections:
 | crawling through a junction | 0.54 | 0.57   |
 | slow turn, 21 km/h          | 0.71 | 0.34   |
 
+3 s forecast NEES over 23 segments: vehicles 1.92, pedestrians 1.91 (2 is consistent).
+
+Emulated detector vs CasA, 23 segments x 3 seeds, MOTA:
+
+|             | CasA  | emulated |
+|-------------|-------|----------|
+| vehicles    | 0.522 | 0.522    |
+| pedestrians | 0.432 | 0.341    |
+| cyclists    | 0.226 | 0.186    |
+
 ## Method
 
 - Extended Kalman filter per track: position, heading, speed, turn rate.
 - Hungarian matching; confirm after 3 hits, drop after 5 misses.
 - Detector emulator replaying CasA's recorded per-object errors.
+- `make tview`: CasA, emulator and independent noise side by side, with Waymo's misses, false
+  positives and ID switches marked.
 
 ## Build and run
 
