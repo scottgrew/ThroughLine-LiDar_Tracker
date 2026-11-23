@@ -3,13 +3,14 @@
 # converts both inputs to Objects protos and runs Waymo's binary in Docker.
 set -euo pipefail
 
-if [ "$#" -ne 2 ]; then
-  echo "usage: run_official.sh <segment_name> <tracks.csv>" >&2
+if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
+  echo "usage: run_official.sh <segment_name> <tracks.csv> [details.tsv]" >&2
   exit 1
 fi
 
 SEGMENT_NAME="$1"
 TRACKS_CSV="$2"
+DETAILS_TSV="${3:-}"
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_TAG="tracker-official-eval"
 
@@ -37,3 +38,12 @@ docker run --rm --platform linux/amd64 \
   -v "$WORK_DIR:/data" \
   "$IMAGE_TAG" \
   /data/predictions.bin /data/ground_truth.bin
+
+if [ -n "$DETAILS_TSV" ]; then
+  echo "run_official.sh: writing per-frame matches to $DETAILS_TSV..." >&2
+  docker run --rm --platform linux/amd64 \
+    -v "$WORK_DIR:/data" \
+    --entrypoint /workspace/waymo-open-dataset/src/bazel-bin/waymo_open_dataset/metrics/tools/compute_tracking_details_main \
+    "$IMAGE_TAG" \
+    /data/predictions.bin /data/ground_truth.bin > "$DETAILS_TSV"
+fi

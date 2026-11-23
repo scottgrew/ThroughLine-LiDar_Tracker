@@ -21,8 +21,7 @@ published detections. Boxes under 0.5 confidence are dropped, or under 0.7 for p
 | crawling through a junction | 0.54 | 0.57   |
 | slow turn, 21 km/h          | 0.71 | 0.34   |
 
-Most of the errors on the fast road are distant cars the detector missed. A frame takes 3 to
-4 ms at the median and about 7 ms at the 99th percentile, against 100 ms between scans.
+Most of the errors on the fast road are distant cars the detector missed.
 
 The forecast's uncertainty matches its error. Over 23 validation segments, the 3 s forecast of
 a moving object is compared with where its label is 3 s later, scaled by the forecast's own
@@ -60,6 +59,34 @@ flowchart TD
     TRACKS --> VIEW & SCORE
 ```
 
+## Emulated detector
+
+Waymo's motion dataset has labels but no detector output, so `stage_segment.py --emulate SEED`
+makes detector boxes from the labels. Each labelled object replays a recorded run of CasA's own
+errors for its class and range: box offsets, flipped headings and misses, held for as long as
+CasA held them. Runs come from the other 22 segments, never the one being staged.
+
+Over 23 validation segments and three seeds, scored with Waymo's evaluator at LEVEL_2:
+
+| | CasA | emulated |
+|---|---|---|
+| vehicle MOTA | 0.522 | 0.522 |
+| pedestrian MOTA | 0.432 | 0.341 |
+| cyclist MOTA | 0.226 | 0.186 |
+
+## Side-by-side view
+
+```
+make tview SEGMENT=10203656353524179475_7625_000_7645_000
+```
+
+tracks one segment three ways (CasA's boxes, the emulator, and the same emulator with its
+frame-to-frame memory removed) and writes one recording. Open it in Lichtblick with
+`viz/tview_layout.json`: three 3D panels, one per run, with each labelled object in grey, a
+missed one in red, a false-positive track in orange and an ID switch in magenta. The marks come
+from Waymo's evaluator itself (a second build of its tracking metrics that reports every
+frame's matches), so they add up to the scores it prints.
+
 ## Build and run
 
 Builds on macOS on Intel only: CMake downloads the x86_64 macOS Foxglove SDK and looks for
@@ -75,6 +102,7 @@ make live       # track at the scans' own pace on ws://127.0.0.1:8765
 make run        # track as fast as possible and write tracks.csv
 make official   # score tracks.csv with Waymo's evaluator in Docker
 make consistency  # 3 s forecast error against the labels, per class and speed
+make tview     # the three-way view of one segment (needs Docker)
 ```
 
 Data paths default to `~/waymo-data`: Waymo's v2 Parquet files in `parquet/`, and CasA's
@@ -92,4 +120,6 @@ The Waymo Open Dataset needs a Waymo account. CasA's detection files are linked 
 - Forecasts for parked objects are overconfident (NEES 5 to 34 on three segments, at 0.1 to
   0.6 m median error): the detector's box centre sits a fixed offset from the label's, and
   the filter averages that offset away as if it were noise.
-- Latency with the viewer connected hasn't been measured.
+- The emulator is weakest on pedestrians: pedestrian MOTA 0.34 against CasA's 0.43, and ID
+  switches about twice CasA's rate in every class. Its objects are also too uniform: 0.4% of
+  emulated pedestrians are never detected, against 4.9% under CasA.

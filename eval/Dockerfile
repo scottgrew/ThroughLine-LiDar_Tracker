@@ -13,4 +13,9 @@ RUN git clone --depth 1 https://github.com/waymo-research/waymo-open-dataset /wo
 WORKDIR /workspace/waymo-open-dataset/src
 RUN bazel build --jobs=2 //waymo_open_dataset/metrics/tools:compute_tracking_metrics_main
 
+# The second binary prints per-frame matches for marks.py; it is not the entrypoint.
+COPY compute_tracking_details_main.cc waymo_open_dataset/metrics/tools/
+RUN printf '\ncc_binary(\n    name = "compute_tracking_details_main",\n    srcs = ["compute_tracking_details_main.cc"],\n    deps = [\n        "//waymo_open_dataset:label_cc_proto",\n        "//waymo_open_dataset/metrics:config_util",\n        "//waymo_open_dataset/metrics:tracking_metrics",\n        "//waymo_open_dataset/protos:breakdown_cc_proto",\n        "//waymo_open_dataset/protos:metrics_cc_proto",\n    ],\n)\n' >> waymo_open_dataset/metrics/tools/BUILD \
+ && bazel build --jobs=2 //waymo_open_dataset/metrics/tools:compute_tracking_details_main
+
 ENTRYPOINT ["/workspace/waymo-open-dataset/src/bazel-bin/waymo_open_dataset/metrics/tools/compute_tracking_metrics_main"]

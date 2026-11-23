@@ -38,9 +38,11 @@ Frame to_frame(const tracker::Frame& message) {
       Eigen::Map<const RowMajorPose>(message.vehicle_to_world().data());
   // The log stores x, y, z triples, the same layout as Point.
   static_assert(sizeof(Point) == 3 * sizeof(float));
-  frame.points.resize(message.points_size() / 3);
-  std::memcpy(frame.points.data(), message.points().data(),
-              frame.points.size() * sizeof(Point));
+  if (message.points_size() > 0) {
+    frame.points.resize(message.points_size() / 3);
+    std::memcpy(frame.points.data(), message.points().data(),
+                frame.points.size() * sizeof(Point));
+  }
   frame.detections.reserve(message.detections_size());
   for (const tracker::Detection& detection : message.detections()) {
     const auto object_class =

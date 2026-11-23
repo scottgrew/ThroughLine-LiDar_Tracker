@@ -94,7 +94,7 @@ add_library(tracker_core src/filter.cpp src/tracker.cpp)
 target_include_directories(tracker_core PUBLIC src)
 target_link_libraries(tracker_core PUBLIC Eigen3::Eigen dlib_headers)
 
-add_executable(tracker src/main.cpp src/log.cpp src/scene.cpp)
+add_executable(tracker src/main.cpp src/log.cpp src/marks.cpp src/scene.cpp)
 target_link_libraries(tracker PRIVATE
   tracker_core tracker_proto mcap_headers foxglove_cpp CLI11::CLI11)
 
@@ -102,6 +102,26 @@ enable_testing()
 list(APPEND CMAKE_MODULE_PATH ${catch2_SOURCE_DIR}/extras)
 include(Catch)
 
-add_executable(tracker_tests tests/test_filter.cpp tests/test_assign.cpp)
-target_link_libraries(tracker_tests PRIVATE tracker_core Catch2::Catch2WithMain)
+add_executable(tracker_tests
+  tests/test_filter.cpp
+  tests/test_assign.cpp
+  tests/test_subscriptions.cpp
+  tests/test_marks.cpp
+  src/marks.cpp
+  src/scene.cpp)
+target_link_libraries(tracker_tests PRIVATE
+  tracker_core
+  tracker_proto
+  mcap_headers
+  foxglove_cpp
+  Catch2::Catch2WithMain)
 catch_discover_tests(tracker_tests)
+
+if(DEFINED ENV{LOG} AND EXISTS "$ENV{LOG}")
+  add_test(
+    NAME frame_times
+    COMMAND tracker
+      --segment $ENV{LOG}
+      --frame-times /nonexistent/frame_times.csv)
+  set_tests_properties(frame_times PROPERTIES WILL_FAIL TRUE)
+endif()

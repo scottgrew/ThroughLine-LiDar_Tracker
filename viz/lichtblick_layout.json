@@ -1,0 +1,67 @@
+{
+  "configById": {
+    "3D!tracker": {
+      "followTf": "ego",
+      "followMode": "follow-position",
+      "scene": {
+        "transforms": { "visible": false }
+      },
+      "cameraState": {
+        "distance": 60,
+        "perspective": true,
+        "phi": 45,
+        "thetaOffset": 0,
+        "targetOffset": [0, 0, 0],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "topics": {
+        "/points": {
+          "visible": true,
+          "pointSize": 1.5,
+          "colorMode": "colormap",
+          "colorField": "z",
+          "colorMap": "turbo",
+          "explicitAlpha": 0.6
+        },
+        "/scene": { "visible": true }
+      }
+    },
+    "3D!topdown": {
+      "followTf": "ego",
+      "followMode": "follow-position",
+      "scene": {
+        "transforms": { "visible": false }
+      },
+      "cameraState": {
+        "distance": 120,
+        "perspective": false,
+        "phi": 0,
+        "thetaOffset": 0,
+        "targetOffset": [0, 0, 0],
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "topics": {
+        "/points": {
+          "visible": true,
+          "pointSize": 1,
+          "colorMode": "flat",
+          "flatColor": "#8a8a8a66"
+        },
+        "/scene": { "visible": true }
+      }
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": { "speed": 1 },
+  "layout": {
+    "direction": "row",
+    "first": "3D!tracker",
+    "second": "3D!topdown",
+    "splitPercentage": 62
+  }
+}

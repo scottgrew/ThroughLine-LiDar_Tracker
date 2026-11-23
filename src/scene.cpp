@@ -13,6 +13,8 @@
 #include <cstring>
 #include <memory>
 #include <numbers>
+#include <condition_variable>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -24,6 +26,7 @@
 #include <foxglove/messages.hpp>
 #include <foxglove/websocket.hpp>
 #include "filter.hpp"
+#include "marks.hpp"
 #include "types.hpp"
 
 namespace fg = foxglove::messages;
@@ -44,6 +47,15 @@ constexpr fg::Vector3 kEgoSize{.x = 5.2, .y = 2.4, .z = 1.8};
 constexpr fg::Color kEgoColor{.r = 0.8, .g = 0.8, .b = 0.8, .a = 1.0};
 constexpr fg::Color kWhite{.r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0};
 constexpr double kBoxAlpha = 0.35;
+
+// Colours of the evaluator's marks, and the size factor that makes an id
+// switch show around the box beneath it.
+constexpr fg::Color kLabelMarkColor{.r = 0.8, .g = 0.8, .b = 0.8, .a = 0.15};
+constexpr fg::Color kMissMarkColor{.r = 0.95, .g = 0.1, .b = 0.1, .a = 0.6};
+constexpr fg::Color kFalsePositiveMarkColor{
+    .r = 1.0, .g = 0.55, .b = 0.0, .a = 0.6};
+constexpr fg::Color kIdSwitchMarkColor{.r = 0.9, .g = 0.0, .b = 0.9, .a = 0.8};
+constexpr double kIdSwitchScale = 1.15;
 
 // Bytes per packed point, x, y and z as float32 then rgba as uint32.
 constexpr std::uint32_t kPointStrideBytes = 16;
@@ -174,6 +186,20 @@ Points ellipse(const TrackState& end, const Eigen::Vector3d& origin) {
   return points;
 }
 
+fg::Color mark_color(MarkKind kind) {
+  switch (kind) {
+    case MarkKind::kLabel:
+      return kLabelMarkColor;
+    case MarkKind::kMiss:
+      return kMissMarkColor;
+    case MarkKind::kFalsePositive:
+      return kFalsePositiveMarkColor;
+    case MarkKind::kIdSwitch:
+      return kIdSwitchMarkColor;
+  }
+  return kWhite;
+}
+
 void check(foxglove::FoxgloveError error, const std::string& action) {
   if (error != foxglove::FoxgloveError::Ok)
     throw std::runtime_error(action + ": " + foxglove::strerror(error));
@@ -191,25 +217,71 @@ Channel open_channel(const std::string& topic) {
   return unwrap(Channel::create(topic), "cannot create " + topic);
 }
 
+// Opens the channel only when there is no topic prefix.
+template <typename Channel>
+std::optional<Channel> open_if_plain(bool plain, const std::string& topic) {
+  if (!plain) return std::nullopt;
+  return open_channel<Channel>(topic);
+}
+
 }  // namespace
+
+void Subscriptions::record() {
+  const std::scoped_lock lock(mutex_);
+  ++count_;
+  cv_.notify_all();
+}
+
+bool Subscriptions::wait_until(std::size_t count, Milliseconds timeout) {
+  std::unique_lock lock(mutex_);
+  return cv_.wait_for(lock, timeout, [this, count] { return count_ >= count; });
+}
 
 // The sinks every channel logs to, plus the channels. Both sinks share the
 // default context, so one log() call reaches the viewer and the file.
 struct Scene::Sinks {
+  explicit Sinks(const std::string& topic_prefix, bool with_marks);
+  Subscriptions subscriptions;
   std::optional<foxglove::WebSocketServer> server;
   std::optional<foxglove::McapWriter> writer;
-  fg::PointCloudChannel points = open_channel<fg::PointCloudChannel>("/points");
-  fg::FrameTransformChannel transform =
-      open_channel<fg::FrameTransformChannel>("/tf");
-  fg::SceneUpdateChannel scene = open_channel<fg::SceneUpdateChannel>("/scene");
+  std::optional<fg::PointCloudChannel> points;
+  std::optional<fg::FrameTransformChannel> transform;
+  fg::SceneUpdateChannel scene;
+  std::optional<fg::SceneUpdateChannel> marks;
 };
 
+// The unprefixed arm carries the points and the ego transform; a prefixed arm
+// carries only its scene and, when asked, its marks. Points and transform are
+// opened first, in the order the channels have always been created.
+Scene::Sinks::Sinks(const std::string& topic_prefix, bool with_marks)
+    : points(open_if_plain<fg::PointCloudChannel>(topic_prefix.empty(),
+                                                  "/points")),
+      transform(open_if_plain<fg::FrameTransformChannel>(topic_prefix.empty(),
+                                                         "/tf")),
+      scene(open_channel<fg::SceneUpdateChannel>(topic_prefix + "/scene")) {
+  if (with_marks)
+    marks = open_channel<fg::SceneUpdateChannel>(topic_prefix + "/marks");
+}
+
+bool Scene::wait_for_subscriptions(std::size_t count, Milliseconds timeout) {
+  if (count == 0) return true;
+  if (!sinks_) return false;
+  return sinks_->subscriptions.wait_until(count, timeout);
+}
+
 Scene::Scene(const SceneOptions& options, FilterNoise noise)
-    : filter_(noise), sinks_(std::make_unique<Sinks>()) {
+    : filter_(noise),
+      sinks_(std::make_unique<Sinks>(options.topic_prefix,
+                                     !options.marks.empty())),
+      marks_(options.marks) {
   if (options.live_port != 0) {
     foxglove::WebSocketServerOptions server_options;
     server_options.name = "tracker";
     server_options.port = options.live_port;
+    server_options.callbacks.onSubscribe =
+        [&subs = sinks_->subscriptions](
+            std::uint64_t /*channel_id*/,
+            const foxglove::ClientMetadata& /*client*/) { subs.record(); };
     sinks_->server =
         unwrap(foxglove::WebSocketServer::create(std::move(server_options)),
                "cannot start the live server");
@@ -257,34 +329,37 @@ void Scene::publish(const Frame& frame, const std::vector<Track>& tracks) {
   transform.child_frame_id = "ego";
   transform.translation = to_vector(ego_position);
   transform.rotation = yaw_rotation(ego_yaw);
-  check(sinks_->transform.log(transform, log_time), "cannot log transform");
+  if (sinks_->transform)
+    check(sinks_->transform->log(transform, log_time), "cannot log transform");
 
-  // Each packed point is x, y, z then its height colour. The transform
-  // writes straight into the packed buffer through a strided map.
-  using PointMatrix = Eigen::Matrix<float, 3, Eigen::Dynamic>;
-  using PackedPoints =
-      Eigen::Map<PointMatrix, Eigen::Unaligned, Eigen::OuterStride<4>>;
-  const auto point_count = static_cast<Eigen::Index>(frame.points.size());
-  const Eigen::Map<const PointMatrix> local_points(&frame.points.data()->x, 3,
-                                                   point_count);
-  const Eigen::Vector3f shift = ego_position.cast<float>();
-  fg::PointCloud cloud;
-  cloud.timestamp = stamp;
-  cloud.frame_id = "world";
-  cloud.pose = pose_at(Eigen::Vector3d::Zero(), 0.0);
-  cloud.point_stride = kPointStrideBytes;
-  cloud.fields = point_fields();
-  packed_points_.resize(static_cast<std::size_t>(point_count) * 4);
-  PackedPoints scene_points(packed_points_.data(), 3, point_count);
-  scene_points = (rotation.cast<float>() * local_points).colwise() + shift;
-  for (Eigen::Index index = 0; index < point_count; ++index) {
-    const std::uint32_t color = height_color(scene_points(2, index));
-    packed_points_[index * 4 + 3] = std::bit_cast<float>(color);
+  if (sinks_->points && !frame.points.empty()) {
+    // Each packed point is x, y, z then its height colour. The transform
+    // writes straight into the packed buffer through a strided map.
+    using PointMatrix = Eigen::Matrix<float, 3, Eigen::Dynamic>;
+    using PackedPoints =
+        Eigen::Map<PointMatrix, Eigen::Unaligned, Eigen::OuterStride<4>>;
+    const auto point_count = static_cast<Eigen::Index>(frame.points.size());
+    const Eigen::Map<const PointMatrix> local_points(&frame.points.data()->x, 3,
+                                                     point_count);
+    const Eigen::Vector3f shift = ego_position.cast<float>();
+    fg::PointCloud cloud;
+    cloud.timestamp = stamp;
+    cloud.frame_id = "world";
+    cloud.pose = pose_at(Eigen::Vector3d::Zero(), 0.0);
+    cloud.point_stride = kPointStrideBytes;
+    cloud.fields = point_fields();
+    packed_points_.resize(static_cast<std::size_t>(point_count) * 4);
+    PackedPoints scene_points(packed_points_.data(), 3, point_count);
+    scene_points = (rotation.cast<float>() * local_points).colwise() + shift;
+    for (Eigen::Index index = 0; index < point_count; ++index) {
+      const std::uint32_t color = height_color(scene_points(2, index));
+      packed_points_[index * 4 + 3] = std::bit_cast<float>(color);
+    }
+    const std::span<const std::byte> bytes =
+        std::as_bytes(std::span(packed_points_));
+    cloud.data.assign(bytes.begin(), bytes.end());
+    check(sinks_->points->log(cloud, log_time), "cannot log point cloud");
   }
-  const std::span<const std::byte> bytes =
-      std::as_bytes(std::span(packed_points_));
-  cloud.data.assign(bytes.begin(), bytes.end());
-  check(sinks_->points.log(cloud, log_time), "cannot log point cloud");
 
   fg::SceneUpdate update;
   fg::SceneEntity& ego = update.entities.emplace_back();
@@ -361,4 +436,40 @@ void Scene::publish(const Frame& frame, const std::vector<Track>& tracks) {
   }
   drawn_track_ids_ = std::move(current_track_ids);
   check(sinks_->scene.log(update, log_time), "cannot log scene");
+
+  if (sinks_->marks) {
+    // Each frame clears the last one's marks, then draws its own capture
+    // time's marks, if any.
+    fg::SceneUpdate marks_update;
+    fg::SceneEntityDeletion& clear = marks_update.deletions.emplace_back();
+    clear.timestamp = stamp;
+    clear.type = fg::SceneEntityDeletion::SceneEntityDeletionType::ALL;
+    const auto found = marks_.find(frame.capture_time_micros);
+    if (found != marks_.end()) {
+      const std::vector<Mark>& marks = found->second;
+      marks_update.entities.reserve(marks.size());
+      for (std::size_t index = 0; index < marks.size(); ++index) {
+        const Box& box = marks[index].box;
+        const Eigen::Vector4d centre_vehicle(box.center_x, box.center_y,
+                                             box.center_z, 1.0);
+        const Eigen::Vector4d centre_world =
+            frame.vehicle_to_world * centre_vehicle;
+        const double scale =
+            marks[index].kind == MarkKind::kIdSwitch ? kIdSwitchScale : 1.0;
+
+        fg::SceneEntity& entity = marks_update.entities.emplace_back();
+        entity.timestamp = stamp;
+        entity.frame_id = "world";
+        entity.id = "m" + std::to_string(index);
+        fg::CubePrimitive& cube = entity.cubes.emplace_back();
+        cube.pose =
+            pose_at(centre_world.head<3>() - origin_, box.yaw + ego_yaw);
+        cube.size = {.x = box.length * scale,
+                     .y = box.width * scale,
+                     .z = box.height * scale};
+        cube.color = mark_color(marks[index].kind);
+      }
+    }
+    check(sinks_->marks->log(marks_update, log_time), "cannot log marks");
+  }
 }

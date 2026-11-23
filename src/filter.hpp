@@ -22,6 +22,10 @@ struct ClassPrior {
   double speed_sigma;
   double yaw_rate_sigma;
   double acceleration_sigma;
+  // The detector's persistent box-centre offset from the label, in metres.
+  // The filter cannot average a fixed offset away, so the forecast adds
+  // this sigma squared to each position variance. 0 until measured.
+  double position_floor_sigma = 0.0;
 };
 
 constexpr ClassPrior kVehiclePrior{
@@ -96,5 +100,6 @@ class MotionFilter {
 };
 
 // The state kForecastHorizonMicros ahead, advanced in kForecastStepMicros
-// steps (the same path the scene draws).
+// steps (the same path the scene draws). The position-floor variance is
+// added once at the horizon, to the position block of the covariance only.
 TrackState forecast(const MotionFilter& filter, TrackState state);

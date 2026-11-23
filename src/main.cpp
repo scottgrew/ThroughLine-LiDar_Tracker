@@ -11,6 +11,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <exception>
 #include <ratio>
 #include <thread>
@@ -21,6 +22,7 @@
 #include <Eigen/Dense>
 #include "filter.hpp"
 #include "log.hpp"
+#include "marks.hpp"
 #include "scene.hpp"
 #include "tracker.hpp"
 #include "types.hpp"
@@ -141,6 +143,25 @@ struct FrameTimes {
   }
 };
 
+// One run's per-frame stage times and the capture time of each frame.
+struct TrackingResult {
+  FrameTimes times;
+  std::vector<std::int64_t> capture_times;
+};
+
+// Writes the per-frame stage times; throws if the file cannot be opened.
+void write_frame_times(const std::string& path, const TrackingResult& run) {
+  const FrameTimes& times = run.times;
+  std::ofstream out(path, std::ios::app);
+  if (!out) throw std::runtime_error("cannot open " + path);
+  for (std::size_t frame = 0; frame < times.frame.milliseconds.size(); ++frame)
+    out << frame << ',' << run.capture_times.at(frame) << ','
+        << times.read.milliseconds.at(frame) << ','
+        << times.track.milliseconds.at(frame) << ','
+        << times.publish.milliseconds.at(frame) << ','
+        << times.frame.milliseconds.at(frame) << '\n';
+}
+
 // Holds the loop to the frames' own pace: frame k is released when as much
 // wall time has passed since the first frame as capture time has.
 class Pacer {
@@ -155,11 +176,94 @@ class Pacer {
   std::optional<std::pair<Clock::time_point, std::int64_t>> start_;
 };
 
+// Opens the frame-times file and writes the header so a bad path fails first.
+void open_frame_times_or_throw(const std::string& path) {
+  std::ofstream probe(path);
+  if (!probe) throw std::runtime_error("cannot open " + path);
+  probe << "frame,capture_time_micros,read_ms,track_ms,publish_ms,frame_ms\n";
+}
+
+// Blocks before the paced loop when the run waits for viewer subscriptions.
+void wait_for_viewer(Scene* scene, const SceneOptions& options) {
+  if (options.wait_subscriptions == 0) return;
+  if (scene == nullptr || !scene->wait_for_subscriptions(
+                              options.wait_subscriptions, options.wait_timeout))
+    throw std::runtime_error("no viewer subscribed within " +
+                             std::to_string(options.wait_timeout.count()) +
+                             " ms");
+}
+
+// What the read-track-publish loop reads from and writes to. Reader, tracker
+// and filter are never null; a null sink is skipped.
+struct Pipeline {
+  SegmentReader* reader;
+  Tracker* tracker;
+  bool paced;
+  Scene* scene;
+  CsvWriter* csv;
+  ForecastCsvWriter* forecast_csv;
+  const MotionFilter* forecast_filter;
+};
+
+// Runs the read-track-publish loop and returns the captured stage times.
+TrackingResult track_segment(const Pipeline& run) {
+  Pacer pacer;
+  TrackingResult result;
+  for (;;) {
+    const Clock::time_point read_start = Clock::now();
+    const std::optional<Frame> frame = run.reader->next_frame();
+    if (!frame) break;
+    result.times.read.record(read_start, Clock::now());
+    if (run.paced) pacer.wait_for(frame->capture_time_micros);
+
+    const Clock::time_point track_start = Clock::now();
+    run.tracker->step(*frame);
+    const std::vector<Track> tracks =
+        run.tracker->confirmed_at(frame->capture_time_micros);
+    const Clock::time_point track_end = Clock::now();
+    result.times.track.record(track_start, track_end);
+
+    if (run.csv != nullptr) run.csv->write(*frame, tracks);
+    if (run.forecast_csv != nullptr) {
+      for (const Track& track : tracks)
+        run.forecast_csv->write(frame->capture_time_micros, track,
+                                *run.forecast_filter);
+    }
+    if (run.scene != nullptr) run.scene->publish(*frame, tracks);
+    result.times.publish.record(track_end, Clock::now());
+    result.times.close_frame();
+    result.capture_times.push_back(frame->capture_time_micros);
+  }
+  return result;
+}
+
+template <ObjectClass ClassValue>
+void bind_priors(CLI::App& app, TrackerSettings& cfg, const char* name) {
+  constexpr std::size_t index = class_index(ClassValue);
+  app.add_option(std::string("--acceleration-sigma-") + name,
+                 cfg.noise.priors[index].acceleration_sigma,
+                 std::string(name) + " linear acceleration sigma, m/s^2")
+      ->check(CLI::PositiveNumber);
+  app.add_option(std::string("--position-floor-") + name,
+                 cfg.noise.priors[index].position_floor_sigma,
+                 std::string(name) + " forecast position floor sigma, m")
+      ->check(CLI::NonNegativeNumber);
+}
+
+// An empty prefix is the unprefixed arm; otherwise it is a topic path such as
+// "/arm" with no trailing slash.
+bool is_valid_topic_prefix(std::string_view prefix) {
+  if (prefix.empty()) return true;
+  return prefix.front() == '/' && prefix.back() != '/';
+}
+
 int run(int argument_count, char* const* arguments) {
   CLI::App app{"Live multi-object tracker on a staged Waymo segment"};
   std::string segment_path;
   std::string csv_path;
   std::string forecast_path;
+  std::string frame_times_path;
+  std::string marks_path;
   SceneOptions scene_options;
   bool paced = false;
   TrackerSettings settings;
@@ -170,9 +274,19 @@ int run(int argument_count, char* const* arguments) {
                  "frames' own pace");
   app.add_option("--record", scene_options.recording_path,
                  "also write the scene to this .mcap file");
+  app.add_option("--topic-prefix", scene_options.topic_prefix,
+                 "put the scene and marks on PREFIX/scene and PREFIX/marks; "
+                 "no points or tf");
+  app.add_option("--marks", marks_path,
+                 "draw the evaluator's marks from this CSV (eval/marks.py)");
   app.add_option("--export", csv_path, "write confirmed tracks as CSV");
   app.add_option("--export-forecast", forecast_path,
                  "write 3 s forecast covariances as CSV");
+  app.add_option("--frame-times", frame_times_path,
+                 "write per-frame stage times as CSV");
+  app.add_option("--wait-subscriptions", scene_options.wait_subscriptions,
+                 "block until this many channel subscriptions arrive")
+      ->needs("--live");
   app.add_option("--sigma-position", settings.noise.sigma_measurement_position,
                  "measurement position sigma, metres (default: the "
                  "detector's measured error on the segment)");
@@ -183,23 +297,17 @@ int run(int argument_count, char* const* arguments) {
                  settings.noise.sigma_yaw_acceleration,
                  "yaw acceleration process noise, rad/s^2")
       ->check(CLI::PositiveNumber);
-  app.add_option("--acceleration-sigma-vehicle",
-                 settings.noise.priors[class_index(ObjectClass::Vehicle)]
-                     .acceleration_sigma,
-                 "vehicle linear acceleration sigma, m/s^2")
-      ->check(CLI::PositiveNumber);
-  app.add_option("--acceleration-sigma-pedestrian",
-                 settings.noise.priors[class_index(ObjectClass::Pedestrian)]
-                     .acceleration_sigma,
-                 "pedestrian linear acceleration sigma, m/s^2")
-      ->check(CLI::PositiveNumber);
-  app.add_option("--acceleration-sigma-cyclist",
-                 settings.noise.priors[class_index(ObjectClass::Cyclist)]
-                     .acceleration_sigma,
-                 "cyclist linear acceleration sigma, m/s^2")
-      ->check(CLI::PositiveNumber);
+  bind_priors<ObjectClass::Vehicle>(app, settings, "vehicle");
+  bind_priors<ObjectClass::Pedestrian>(app, settings, "pedestrian");
+  bind_priors<ObjectClass::Cyclist>(app, settings, "cyclist");
   CLI11_PARSE(app, argument_count, arguments);
   paced = scene_options.live_port != 0;
+  if (!is_valid_topic_prefix(scene_options.topic_prefix))
+    throw std::runtime_error(
+        "--topic-prefix must start with '/' and not end with '/'");
+  if (!marks_path.empty()) scene_options.marks = load_marks(marks_path);
+
+  if (!frame_times_path.empty()) open_frame_times_or_throw(frame_times_path);
 
   SegmentReader reader(segment_path);
   if (app.count("--sigma-position") == 0)
@@ -220,43 +328,27 @@ int run(int argument_count, char* const* arguments) {
     std::cout << "serving ws://127.0.0.1:" << scene_options.live_port
               << " for Lichtblick\n";
 
-  Pacer pacer;
-  FrameTimes times;
-  std::vector<std::int64_t> capture_times;
-  for (;;) {
-    const Clock::time_point read_start = Clock::now();
-    const std::optional<Frame> frame = reader.next_frame();
-    if (!frame) break;
-    times.read.record(read_start, Clock::now());
-    if (paced) pacer.wait_for(frame->capture_time_micros);
+  wait_for_viewer(scene ? &*scene : nullptr, scene_options);
 
-    const Clock::time_point track_start = Clock::now();
-    tracker.step(*frame);
-    const std::vector<Track> tracks =
-        tracker.confirmed_at(frame->capture_time_micros);
-    const Clock::time_point track_end = Clock::now();
-    times.track.record(track_start, track_end);
-
-    if (csv) csv->write(*frame, tracks);
-    if (forecast_csv) {
-      for (const Track& track : tracks)
-        forecast_csv->write(frame->capture_time_micros, track, forecast_filter);
-    }
-    if (scene) scene->publish(*frame, tracks);
-    times.publish.record(track_end, Clock::now());
-    times.close_frame();
-    capture_times.push_back(frame->capture_time_micros);
-  }
+  const TrackingResult result =
+      track_segment({.reader = &reader,
+                     .tracker = &tracker,
+                     .paced = paced,
+                     .scene = scene ? &*scene : nullptr,
+                     .csv = csv ? &*csv : nullptr,
+                     .forecast_csv = forecast_csv ? &*forecast_csv : nullptr,
+                     .forecast_filter = &forecast_filter});
   if (scene) scene->close();
 
+  if (!frame_times_path.empty()) write_frame_times(frame_times_path, result);
+  const std::vector<std::int64_t>& capture_times = result.capture_times;
   const double frame_period_milliseconds =
       capture_times.size() >= 2
           ? static_cast<double>(capture_times[1] - capture_times[0]) / 1000.0
           : 100.0;
-  times.print(std::cout, frame_period_milliseconds);
+  result.times.print(std::cout, frame_period_milliseconds);
   return 0;
 }
-
 }  // namespace
 
 int main(int argument_count, char** arguments) {
