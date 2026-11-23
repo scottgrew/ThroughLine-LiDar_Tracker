@@ -1,19 +1,14 @@
 # Throughline
 
-Real-time multi-object tracker for Waymo Open Dataset LiDAR, written in C++. It takes a
-detector's 3D boxes for each scan, keeps a persistent ID on every car and pedestrian through
-missed detections, and forecasts each one three seconds ahead. The scene streams to Lichtblick
-while it runs.
+Real-time multi-object tracker for Waymo Open Dataset LiDAR, in C++. It keeps a persistent ID
+on every car and pedestrian through missed detections, forecasts each one 3 s ahead, and
+streams the scene to Lichtblick.
 
 ![Tracking through a turn](docs/media/turn.gif)
 
-*Blue boxes are tracked cars. The line in front of each one is where the tracker thinks it is
-going.*
-
 ## Results
 
-MOTA from Waymo's evaluator at LEVEL_2, on three validation clips. The input is CasA's
-published detections. Boxes under 0.5 confidence are dropped, or under 0.7 for pedestrians.
+MOTA from Waymo's evaluator (LEVEL_2) on CasA's published detections:
 
 | scene                       | cars | people |
 |-----------------------------|------|--------|
@@ -21,105 +16,28 @@ published detections. Boxes under 0.5 confidence are dropped, or under 0.7 for p
 | crawling through a junction | 0.54 | 0.57   |
 | slow turn, 21 km/h          | 0.71 | 0.34   |
 
-Most of the errors on the fast road are distant cars the detector missed.
-
-The forecast's uncertainty matches its error. Over 23 validation segments, the 3 s forecast of
-a moving object is compared with where its label is 3 s later, scaled by the forecast's own
-covariance (NEES, which averages 2 when the covariance is right). Vehicles average 1.92 over
-16,632 forecasts, pedestrians 1.91 over 19,100, cyclists 1.71 over 590. The acceleration
-noise per class was fitted to that; with any one segment held out, the fit picks the same
-values in 22 of 23 cases.
-
 ## Method
 
-Each track runs an extended Kalman filter over position, heading, speed and turn rate. New
-boxes are matched to predicted tracks with the Hungarian algorithm, and pairs that are too far
-apart are rejected. A track is confirmed after 3 hits and dropped after 5 misses.
-
-```mermaid
-flowchart TD
-    IN["Waymo LiDAR scans<br/>and detector boxes"]
-
-    subgraph FRAME["Every frame"]
-        PREDICT["Extended Kalman filter<br/>move each known object<br/>by its speed and turn rate"]
-        MATCH["Hungarian algorithm<br/>match boxes to objects,<br/>far-apart pairs thrown out"]
-        UPDATE["Matched<br/>update with the new box"]
-        BIRTH["Box with no match<br/>start a new track"]
-        COAST["Object with no match<br/>coast, drop after<br/>five misses"]
-        PREDICT --> MATCH
-        MATCH --> UPDATE & BIRTH & COAST
-    end
-
-    TRACKS["Tracks<br/>ID, position,<br/>speed, turn rate"]
-    VIEW["Live 3D view"]
-    SCORE["Scored by Waymo's<br/>tracking metrics"]
-
-    IN --> PREDICT
-    UPDATE & BIRTH & COAST --> TRACKS
-    TRACKS --> VIEW & SCORE
-```
-
-## Emulated detector
-
-Waymo's motion dataset has labels but no detector output, so `stage_segment.py --emulate SEED`
-makes detector boxes from the labels. Each labelled object replays a recorded run of CasA's own
-errors for its class and range: box offsets, flipped headings and misses, held for as long as
-CasA held them. Runs come from the other 22 segments, never the one being staged.
-
-Over 23 validation segments and three seeds, scored with Waymo's evaluator at LEVEL_2:
-
-| | CasA | emulated |
-|---|---|---|
-| vehicle MOTA | 0.522 | 0.522 |
-| pedestrian MOTA | 0.432 | 0.341 |
-| cyclist MOTA | 0.226 | 0.186 |
-
-## Side-by-side view
-
-```
-make tview SEGMENT=10203656353524179475_7625_000_7645_000
-```
-
-tracks one segment three ways (CasA's boxes, the emulator, and the same emulator with its
-frame-to-frame memory removed) and writes one recording. Open it in Lichtblick with
-`viz/tview_layout.json`: three 3D panels, one per run, with each labelled object in grey, a
-missed one in red, a false-positive track in orange and an ID switch in magenta. The marks come
-from Waymo's evaluator itself (a second build of its tracking metrics that reports every
-frame's matches), so they add up to the scores it prints.
+- Extended Kalman filter per track: position, heading, speed, turn rate.
+- Hungarian matching; confirm after 3 hits, drop after 5 misses.
+- Detector emulator replaying CasA's recorded per-object errors.
 
 ## Build and run
 
-Builds on macOS on Intel only: CMake downloads the x86_64 macOS Foxglove SDK and looks for
-zstd and lz4 under `/usr/local`. Install `cmake`, `protobuf`, `zstd` and `lz4` with Homebrew.
-Eigen, dlib, Catch2, CLI11, MCAP and the Foxglove SDK are fetched during configuration.
-Staging needs Python with `pyarrow`, `numpy`, `pandas`, `protobuf` and
-`mcap-protobuf-support`. Scoring needs Docker.
+macOS on Intel. Homebrew `cmake`, `protobuf`, `zstd`, `lz4`; Python `pyarrow`, `numpy`,
+`pandas`, `protobuf`, `mcap-protobuf-support`; Docker. Data in `~/waymo-data`: Waymo v2
+Parquet and CasA's `result.pkl` from
+[3D-Multi-Object-Tracker](https://github.com/hailanyi/3D-Multi-Object-Tracker).
 
 ```
-make test       # unit tests, no data needed
-make stage      # stage one Waymo segment and its CasA boxes
-make live       # track at the scans' own pace on ws://127.0.0.1:8765
-make run        # track as fast as possible and write tracks.csv
-make official   # score tracks.csv with Waymo's evaluator in Docker
-make consistency  # 3 s forecast error against the labels, per class and speed
-make tview     # the three-way view of one segment (needs Docker)
+make test       # unit tests
+make stage      # stage a segment and its CasA boxes
+make live       # track live on ws://127.0.0.1:8765
+make official   # score with Waymo's evaluator
+make tview      # CasA vs emulator view, viz/tview_layout.json
 ```
-
-Data paths default to `~/waymo-data`: Waymo's v2 Parquet files in `parquet/`, and CasA's
-validation results in `casa/data/waymo/detections/val/result.pkl`. Override `DATA`,
-`SEGMENT`, `DETECTIONS` or `PYTHON` on the `make` command line.
-
-To watch, open Lichtblick, choose Open connection, then Foxglove WebSocket, and enter
-`ws://127.0.0.1:8765`.
-
-The Waymo Open Dataset needs a Waymo account. CasA's detection files are linked from the
-[3D-Multi-Object-Tracker](https://github.com/hailanyi/3D-Multi-Object-Tracker) repository.
 
 ## Known limitations
 
-- Forecasts for parked objects are overconfident (NEES 5 to 34 on three segments, at 0.1 to
-  0.6 m median error): the detector's box centre sits a fixed offset from the label's, and
-  the filter averages that offset away as if it were noise.
-- The emulator is weakest on pedestrians: pedestrian MOTA 0.34 against CasA's 0.43, and ID
-  switches about twice CasA's rate in every class. Its objects are also too uniform: 0.4% of
-  emulated pedestrians are never detected, against 4.9% under CasA.
+- Forecasts for parked objects are overconfident.
+- Emulated pedestrian MOTA is 0.34 against CasA's 0.43.
