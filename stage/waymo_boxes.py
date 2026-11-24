@@ -4,6 +4,7 @@ Rows are unfiltered; the stager and eval/to_waymo_objects.py apply their
 own filter.
 """
 
+import hashlib
 from typing import NamedTuple
 
 import pyarrow.parquet as pq
@@ -36,6 +37,13 @@ class GroundTruthBox(NamedTuple):
     box: Box
     num_lidar_points_in_box: int
     tracking_difficulty: int | None
+
+
+def stable_object_id(laser_object_id):
+    """Returns the first 8 bytes of the SHA-1 of laser_object_id as a uint64,
+    the identity the staged log and the motmetrics scorer share."""
+    digest = hashlib.sha1(laser_object_id.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], byteorder = "big")
 
 
 # The lidar_box columns to read, in GroundTruthBox field order; the seven

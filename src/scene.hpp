@@ -12,6 +12,7 @@
 #include <vector>
 #include <Eigen/Dense>
 #include "filter.hpp"
+#include "marks.hpp"
 #include "types.hpp"
 
 using Milliseconds = std::chrono::milliseconds;
@@ -36,9 +37,11 @@ struct SceneOptions {
   std::string recording_path;
   std::size_t wait_subscriptions = 0;
   Milliseconds wait_timeout{30000};
-  // Goes in front of /scene. An arm with a prefix publishes no
+  // Goes in front of /scene and /marks. An arm with a prefix publishes no
   // /points or /tf, which the unprefixed arm carries.
   std::string topic_prefix;
+  // The evaluator's marks keyed by capture time, drawn on /marks.
+  MarksByTime marks;
 };
 
 // Owns the live server and the recording. publish() sends one frame to both;
@@ -68,4 +71,6 @@ class Scene {
   std::vector<std::uint64_t> drawn_track_ids_;
   // Packed x, y, z and colour per point, kept so no frame allocates it.
   std::vector<float> packed_points_;
+  // The marks from SceneOptions, copied so each frame looks its own time up.
+  MarksByTime marks_;
 };

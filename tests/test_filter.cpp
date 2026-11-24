@@ -133,12 +133,13 @@ TrackState advance_to_horizon(const MotionFilter& filter, TrackState state) {
   return state;
 }
 
-TrackState make_moving_vehicle_state() {
+TrackState make_moving_vehicle_state(double position_floor_sigma) {
   TrackState state;
   state.mean << 0.0, 0.0, 0.0, 10.0, 0.3;
   state.covariance = StateMatrix::Identity();
   state.time_micros = 0;
   state.acceleration_sigma = kVehiclePrior.acceleration_sigma;
+  state.position_floor_sigma = position_floor_sigma;
   return state;
 }
 
@@ -220,13 +221,56 @@ TEST_CASE("forecast mean is speed times horizon on a straight path") {
   REQUIRE(horizon.mean(kStateY) == Catch::Approx(0.0));
 }
 
-TEST_CASE("forecast matches stepped advance") {
+TEST_CASE("forecast with zero floor matches stepped advance") {
   const MotionFilter filter(kTestNoise);
-  const TrackState initial = make_moving_vehicle_state();
+  const TrackState initial = make_moving_vehicle_state(0.0);
   const TrackState from_forecast = forecast(filter, initial);
   const TrackState stepped = advance_to_horizon(filter, initial);
   REQUIRE(from_forecast.mean == stepped.mean);
   REQUIRE(from_forecast.covariance == stepped.covariance);
+}
+
+TEST_CASE("forecast position floor adds horizon variance only") {
+  const MotionFilter filter(kTestNoise);
+  const TrackState initial = make_moving_vehicle_state(0.4);
+  const TrackState baseline = advance_to_horizon(filter, initial);
+  const TrackState from_forecast = forecast(filter, initial);
+  StateMatrix expected_covariance = baseline.covariance;
+  expected_covariance(kStateX, kStateX) += 0.16;
+  expected_covariance(kStateY, kStateY) += 0.16;
+  REQUIRE(from_forecast.mean == baseline.mean);
+  REQUIRE(from_forecast.covariance == expected_covariance);
+}
+
+TEST_CASE("start_state copies position floor from class prior") {
+  FilterNoise noise = kTestNoise;
+  noise.priors[class_index(ObjectClass::Pedestrian)].position_floor_sigma =
+      0.25;
+  noise.priors[class_index(ObjectClass::Vehicle)].position_floor_sigma = 0.9;
+  const MotionFilter filter(noise);
+  const Detection detection{.object_class = ObjectClass::Pedestrian,
+                            .box = {1.0, 2.0, 0.0, 0.6, 0.6, 1.7, 0.0}};
+  const TrackState state = filter.start_state(detection);
+  REQUIRE(state.position_floor_sigma == 0.25);
+}
+
+TEST_CASE("predict and update ignore position floor") {
+  const MotionFilter filter(kTestNoise);
+  TrackState with_floor;
+  with_floor.mean << 1.0, 2.0, 0.1, 5.0, 0.2;
+  with_floor.covariance = StateMatrix::Identity() * 2.0;
+  with_floor.time_micros = 0;
+  with_floor.acceleration_sigma = kVehiclePrior.acceleration_sigma;
+  with_floor.position_floor_sigma = 0.4;
+  TrackState without_floor = with_floor;
+  without_floor.position_floor_sigma = 0.0;
+  const Box measurement{1.05, 2.1, 0.0, 4.5, 2.0, 1.6, 0.12};
+  filter.predict(with_floor, kTestStepSeconds);
+  filter.update(with_floor, measurement);
+  filter.predict(without_floor, kTestStepSeconds);
+  filter.update(without_floor, measurement);
+  REQUIRE(with_floor.mean == without_floor.mean);
+  REQUIRE(with_floor.covariance == without_floor.covariance);
 }
 
 TEST_CASE("vehicle prior speed variance comes from FilterNoise::priors") {
