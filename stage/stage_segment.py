@@ -7,18 +7,11 @@ import pickle
 import numpy as np
 import pyarrow.parquet as pq
 import tracker_pb2
-from emulate_detector import (
-    Objects,
-    default_model,
-    emulate,
-    independent_model,
-)
 from mcap.writer import CompressionType
 from mcap_protobuf.writer import Writer
 from waymo_boxes import (
     TRACKED_OBJECT_CLASSES,
     read_ground_truth_boxes,
-    stable_object_id,
 )
 
 # CasA's class names mapped to Waymo's type codes, and per class the score
@@ -178,35 +171,6 @@ def scored_rows(ground_truth):
         yield label
 
 
-def emulate_inputs(ground_truth, times, poses):
-    """Objects and pose per frame for emulate(); uses scored_rows filter."""
-    rows_by_time = {}
-    for label in scored_rows(ground_truth):
-        rows = rows_by_time.setdefault(label.capture_time_micros, [])
-        rows.append((
-            stable_object_id(label.laser_object_id),
-            label.object_class,
-            *label.box,
-        ))
-    frames = []
-    for capture_time in times:
-        rows = rows_by_time.get(capture_time, [])
-        if not rows:
-            objects = Objects(
-                ids=np.zeros(0, np.uint64),
-                classes=np.zeros(0, np.int64),
-                boxes=np.zeros((0, 7)),
-            )
-        else:
-            ids = np.array([row[0] for row in rows], dtype=np.uint64)
-            classes = np.array([row[1] for row in rows], dtype=np.int64)
-            boxes = np.array([row[2:] for row in rows], dtype=np.float64)
-            objects = Objects(ids, classes, boxes)
-        pose = np.asarray(poses[capture_time], dtype=np.float64).reshape(4, 4)
-        frames.append((objects, pose))
-    return frames
-
-
 def scored_labels(ground_truth):
     """Returns {capture time in microseconds: (classes, (N, 7) boxes)} for the
     tracked labels with lidar support, the boxes the evaluator scores."""
@@ -342,16 +306,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--parquet-root", required = True)
     parser.add_argument("--segment", dest = "segment_name", required = True)
-    parser.add_argument("--detections", default=None)
-    parser.add_argument("--emulate", type=int, default=None)
-    parser.add_argument("--emulator", choices=("donor", "independent"),
-                        default="donor")
+    parser.add_argument("--detections", required = True)
     parser.add_argument("--out", required = True)
     arguments = parser.parse_args()
-    if (arguments.detections is None) == (arguments.emulate is None):
-        raise SystemExit("use exactly one of --detections and --emulate")
-    if arguments.emulate is None and arguments.emulator != "donor":
-        raise SystemExit("--emulator applies only with --emulate")
     parquet_root = arguments.parquet_root
     segment_name = arguments.segment_name
 
@@ -359,27 +316,10 @@ def main():
     poses = read_poses(parquet_root, segment_name)
     times = sorted(time for time in points_by_time if time in poses)
     ground_truth = read_ground_truth_boxes(parquet_root, segment_name)
-    if arguments.emulate is not None:
-        frames = emulate_inputs(ground_truth, times, poses)
-        if arguments.emulator == "independent":
-            detections = emulate(
-                frames, segment_name, arguments.emulate,
-                independent_model(default_model()))
-        else:
-            # Imported here: donor_library imports detector_error, which
-            # imports this module, so a top-level import is a cycle.
-            from donor_emulator import build_index, emulate_donor
-            from donor_library import default_library, exclude_segment
-
-            library = exclude_segment(default_library(), segment_name)
-            index = build_index(library)
-            detections = emulate_donor(
-                frames, segment_name, arguments.emulate, index)
-    else:
-        detections = read_detections(arguments.detections, segment_name)
-        if len(detections) != len(times):
-            raise SystemExit(f"{len(detections)} detection frames for "
-                             f"{len(times)} lidar frames")
+    detections = read_detections(arguments.detections, segment_name)
+    if len(detections) != len(times):
+        raise SystemExit(f"{len(detections)} detection frames for "
+                         f"{len(times)} lidar frames")
 
     check_point_ratio(ground_truth, times[0], points_by_time[times[0]])
     labels_by_time = scored_labels(ground_truth)

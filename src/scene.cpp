@@ -1,5 +1,5 @@
-// Publishes a run's lidar points, track boxes, trails, forecasts and
-// uncertainty ellipses as Foxglove scene messages, live and to MCAP.
+// Publishes a run's lidar points, track boxes, trails and forecasts as
+// Foxglove scene messages, live and to MCAP.
 
 #include "scene.hpp"
 
@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
-#include <numbers>
 #include <condition_variable>
 #include <mutex>
 #include <optional>
@@ -26,7 +25,6 @@
 #include <foxglove/messages.hpp>
 #include <foxglove/websocket.hpp>
 #include "filter.hpp"
-#include "marks.hpp"
 #include "types.hpp"
 
 namespace fg = foxglove::messages;
@@ -35,27 +33,16 @@ using Points = std::vector<fg::Point3>;
 
 namespace {
 
-// Drawing constants for the point height ramp, the ellipse, and the line,
-// label and ego box sizes. Lengths are in metres. Chosen.
+// Drawing constants for the point height ramp, and the line, label and ego
+// box sizes. Lengths are in metres. Chosen.
 constexpr float kPointHeightLow = -2.0F;
 constexpr float kPointHeightHigh = 4.0F;
-constexpr int kEllipseSegments = 32;
-constexpr double kEllipseSigma = 2.0;
 constexpr double kLineThickness = 0.08;
 constexpr double kLabelFontSize = 0.6;
 constexpr fg::Vector3 kEgoSize{.x = 5.2, .y = 2.4, .z = 1.8};
 constexpr fg::Color kEgoColor{.r = 0.8, .g = 0.8, .b = 0.8, .a = 1.0};
 constexpr fg::Color kWhite{.r = 1.0, .g = 1.0, .b = 1.0, .a = 1.0};
 constexpr double kBoxAlpha = 0.35;
-
-// Colours of the evaluator's marks, and the size factor that makes an id
-// switch show around the box beneath it.
-constexpr fg::Color kLabelMarkColor{.r = 0.8, .g = 0.8, .b = 0.8, .a = 0.15};
-constexpr fg::Color kMissMarkColor{.r = 0.95, .g = 0.1, .b = 0.1, .a = 0.6};
-constexpr fg::Color kFalsePositiveMarkColor{
-    .r = 1.0, .g = 0.55, .b = 0.0, .a = 0.6};
-constexpr fg::Color kIdSwitchMarkColor{.r = 0.9, .g = 0.0, .b = 0.9, .a = 0.8};
-constexpr double kIdSwitchScale = 1.15;
 
 // Bytes per packed point, x, y and z as float32 then rgba as uint32.
 constexpr std::uint32_t kPointStrideBytes = 16;
@@ -164,42 +151,6 @@ fg::LinePrimitive line(LineType type, fg::Color color, Points points) {
   return primitive;
 }
 
-// The 2-sigma position ellipse of a forecast state, drawn at its height.
-// Each ring point is centre + V (k sqrt(lambda) u) for eigenvectors V and
-// values lambda of the covariance, k = kEllipseSigma and unit-circle u.
-Points ellipse(const TrackState& end, const Eigen::Vector3d& origin) {
-  const Eigen::Vector2d center = end.position() - origin.head<2>();
-  const Eigen::Matrix2d covariance = end.covariance.topLeftCorner<2, 2>();
-  const double height = end.center_z - origin.z();
-  const Eigen::SelfAdjointEigenSolver<Eigen::Matrix2d> solver(covariance);
-  const Eigen::Vector2d axes =
-      kEllipseSigma * solver.eigenvalues().cwiseMax(0.0).cwiseSqrt();
-  Points points;
-  points.reserve(kEllipseSegments);
-  for (int segment = 0; segment < kEllipseSegments; ++segment) {
-    const double angle = 2.0 * std::numbers::pi * segment / kEllipseSegments;
-    const Eigen::Vector2d unit(std::cos(angle), std::sin(angle));
-    const Eigen::Vector2d offset =
-        solver.eigenvectors() * axes.cwiseProduct(unit);
-    points.push_back(to_point(center + offset, height));
-  }
-  return points;
-}
-
-fg::Color mark_color(MarkKind kind) {
-  switch (kind) {
-    case MarkKind::kLabel:
-      return kLabelMarkColor;
-    case MarkKind::kMiss:
-      return kMissMarkColor;
-    case MarkKind::kFalsePositive:
-      return kFalsePositiveMarkColor;
-    case MarkKind::kIdSwitch:
-      return kIdSwitchMarkColor;
-  }
-  return kWhite;
-}
-
 void check(foxglove::FoxgloveError error, const std::string& action) {
   if (error != foxglove::FoxgloveError::Ok)
     throw std::runtime_error(action + ": " + foxglove::strerror(error));
@@ -240,28 +191,24 @@ bool Subscriptions::wait_until(std::size_t count, Milliseconds timeout) {
 // The sinks every channel logs to, plus the channels. Both sinks share the
 // default context, so one log() call reaches the viewer and the file.
 struct Scene::Sinks {
-  explicit Sinks(const std::string& topic_prefix, bool with_marks);
+  explicit Sinks(const std::string& topic_prefix);
   Subscriptions subscriptions;
   std::optional<foxglove::WebSocketServer> server;
   std::optional<foxglove::McapWriter> writer;
   std::optional<fg::PointCloudChannel> points;
   std::optional<fg::FrameTransformChannel> transform;
   fg::SceneUpdateChannel scene;
-  std::optional<fg::SceneUpdateChannel> marks;
 };
 
 // The unprefixed arm carries the points and the ego transform; a prefixed arm
-// carries only its scene and, when asked, its marks. Points and transform are
+// carries only its scene. Points and transform are
 // opened first, in the order the channels have always been created.
-Scene::Sinks::Sinks(const std::string& topic_prefix, bool with_marks)
+Scene::Sinks::Sinks(const std::string& topic_prefix)
     : points(open_if_plain<fg::PointCloudChannel>(topic_prefix.empty(),
                                                   "/points")),
       transform(open_if_plain<fg::FrameTransformChannel>(topic_prefix.empty(),
                                                          "/tf")),
-      scene(open_channel<fg::SceneUpdateChannel>(topic_prefix + "/scene")) {
-  if (with_marks)
-    marks = open_channel<fg::SceneUpdateChannel>(topic_prefix + "/marks");
-}
+      scene(open_channel<fg::SceneUpdateChannel>(topic_prefix + "/scene")) {}
 
 bool Scene::wait_for_subscriptions(std::size_t count, Milliseconds timeout) {
   if (count == 0) return true;
@@ -270,10 +217,7 @@ bool Scene::wait_for_subscriptions(std::size_t count, Milliseconds timeout) {
 }
 
 Scene::Scene(const SceneOptions& options, FilterNoise noise)
-    : filter_(noise),
-      sinks_(std::make_unique<Sinks>(options.topic_prefix,
-                                     !options.marks.empty())),
-      marks_(options.marks) {
+    : filter_(noise), sinks_(std::make_unique<Sinks>(options.topic_prefix)) {
   if (options.live_port != 0) {
     foxglove::WebSocketServerOptions server_options;
     server_options.name = "tracker";
@@ -407,9 +351,6 @@ void Scene::publish(const Frame& frame, const std::vector<Track>& tracks) {
       path.push_back(to_point(path_state.position() - origin_xy, height));
     }
     entity.lines.push_back(line(LineType::LINE_STRIP, color, std::move(path)));
-    const TrackState horizon_state = forecast(filter_, track.state);
-    entity.lines.push_back(
-        line(LineType::LINE_LOOP, color, ellipse(horizon_state, origin_)));
 
     fg::TextPrimitive& label = entity.texts.emplace_back();
     const Eigen::Vector3d roof(0.0, 0.0, track.state.height / 2.0);
@@ -436,40 +377,4 @@ void Scene::publish(const Frame& frame, const std::vector<Track>& tracks) {
   }
   drawn_track_ids_ = std::move(current_track_ids);
   check(sinks_->scene.log(update, log_time), "cannot log scene");
-
-  if (sinks_->marks) {
-    // Each frame clears the last one's marks, then draws its own capture
-    // time's marks, if any.
-    fg::SceneUpdate marks_update;
-    fg::SceneEntityDeletion& clear = marks_update.deletions.emplace_back();
-    clear.timestamp = stamp;
-    clear.type = fg::SceneEntityDeletion::SceneEntityDeletionType::ALL;
-    const auto found = marks_.find(frame.capture_time_micros);
-    if (found != marks_.end()) {
-      const std::vector<Mark>& marks = found->second;
-      marks_update.entities.reserve(marks.size());
-      for (std::size_t index = 0; index < marks.size(); ++index) {
-        const Box& box = marks[index].box;
-        const Eigen::Vector4d centre_vehicle(box.center_x, box.center_y,
-                                             box.center_z, 1.0);
-        const Eigen::Vector4d centre_world =
-            frame.vehicle_to_world * centre_vehicle;
-        const double scale =
-            marks[index].kind == MarkKind::kIdSwitch ? kIdSwitchScale : 1.0;
-
-        fg::SceneEntity& entity = marks_update.entities.emplace_back();
-        entity.timestamp = stamp;
-        entity.frame_id = "world";
-        entity.id = "m" + std::to_string(index);
-        fg::CubePrimitive& cube = entity.cubes.emplace_back();
-        cube.pose =
-            pose_at(centre_world.head<3>() - origin_, box.yaw + ego_yaw);
-        cube.size = {.x = box.length * scale,
-                     .y = box.width * scale,
-                     .z = box.height * scale};
-        cube.color = mark_color(marks[index].kind);
-      }
-    }
-    check(sinks_->marks->log(marks_update, log_time), "cannot log marks");
-  }
 }

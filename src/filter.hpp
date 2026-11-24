@@ -11,21 +11,11 @@
 // What the filter assumes about an object class before it has seen it
 // move: how fast it may already be going, how fast it may be turning, and
 // how hard it may accelerate. Speed in m/s, yaw rate in rad/s,
-// acceleration in m/s^2. Speed and yaw-rate sigmas are chosen. The
-// acceleration sigmas are measured: on 23 validation segments they bring
-// the mean NEES of the 3 s forecast against the labels (2 degrees of
-// freedom, target 2) to 1.92 for moving vehicles, 1.91 for pedestrians
-// and 1.71 for cyclists, and leave-one-segment-out picks the same values
-// in 22 of 23 folds (6 of 6 for cyclists). See
-// stage/forecast_consistency.py.
+// acceleration in m/s^2. All three are chosen.
 struct ClassPrior {
   double speed_sigma;
   double yaw_rate_sigma;
   double acceleration_sigma;
-  // The detector's persistent box-centre offset from the label, in metres.
-  // The filter cannot average a fixed offset away, so the forecast adds
-  // this sigma squared to each position variance. 0 until measured.
-  double position_floor_sigma = 0.0;
 };
 
 constexpr ClassPrior kVehiclePrior{
@@ -50,9 +40,8 @@ constexpr std::size_t class_index(ObjectClass object_class) {
 // Process and measurement noise the filter uses to weigh a
 // prediction against a measurement.
 struct FilterNoise {
-  // Process noise is the sigma of unmodelled yaw acceleration in
-  // rad/s^2; linear acceleration comes from the class prior. Measured with
-  // the class priors' acceleration sigmas (0.5 of 0.5, 1 and 2).
+  // Process noise is the sigma of unmodelled yaw acceleration in rad/s^2;
+  // linear acceleration comes from the class prior.
   double sigma_yaw_acceleration = 0.5;
   // Measurement sigmas are the box jitter stage_segment.py measured for
   // the segment, in metres and radians. MotionFilter refuses <= 0.
@@ -100,6 +89,5 @@ class MotionFilter {
 };
 
 // The state kForecastHorizonMicros ahead, advanced in kForecastStepMicros
-// steps (the same path the scene draws). The position-floor variance is
-// added once at the horizon, to the position block of the covariance only.
+// steps (the same path the scene draws).
 TrackState forecast(const MotionFilter& filter, TrackState state);

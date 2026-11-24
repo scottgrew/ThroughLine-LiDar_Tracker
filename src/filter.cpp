@@ -47,9 +47,6 @@ TrackState forecast(const MotionFilter& filter, TrackState state) {
   const std::int64_t horizon = state.time_micros + kForecastHorizonMicros;
   while (state.time_micros < horizon)
     filter.advance(state, state.time_micros + kForecastStepMicros);
-  const double floor2 = state.position_floor_sigma * state.position_floor_sigma;
-  state.covariance(kStateX, kStateX) += floor2;
-  state.covariance(kStateY, kStateY) += floor2;
   return state;
 }
 
@@ -66,7 +63,6 @@ TrackState MotionFilter::start_state(const Detection& detection) const {
   state.mean << box.center_x, box.center_y, box.yaw, 0.0, 0.0;
   state.covariance = variances.asDiagonal();
   state.acceleration_sigma = prior.acceleration_sigma;
-  state.position_floor_sigma = prior.position_floor_sigma;
   state.center_z = box.center_z;
   state.length = box.length;
   state.width = box.width;

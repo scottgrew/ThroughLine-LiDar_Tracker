@@ -67,15 +67,12 @@ using StateMatrix = Eigen::Matrix<double, kStateSize, kStateSize>;
 
 // Filter mean and covariance over x, y, yaw, speed and yaw rate in the
 // world frame, in m, rad, m/s and rad/s, the time they hold for, the
-// object class's acceleration and position-floor sigmas, and the smoothed
-// box size.
+// object class's acceleration sigma, and the smoothed box size.
 struct TrackState {
   StateVector mean = StateVector::Zero();
   StateMatrix covariance = StateMatrix::Zero();
   std::int64_t time_micros = 0;
   double acceleration_sigma = 0.0;
-  // Forecast-only position variance floor; copied from the class prior.
-  double position_floor_sigma = 0.0;
   double center_z = 0.0;
   double length = 0.0;
   double width = 0.0;
